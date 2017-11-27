@@ -3,42 +3,41 @@
 
 from modules import cbpi
 from modules.core.props import Property
-from modules.core.hardware import SensorActive
+from modules.core.hardware import SensorActive, SensorPassive
 import time
 import math
 
 ################################################################################
 @cbpi.sensor
-class SimulatedSensor(SensorActive):
+class SimulatedTempSensor(SensorActive):
 
-    a_heat_rate_prop = Property.Number("Heat Rate", configurable=True, default_value=10, description="Units per minute")
+    a_heat_rate_prop = Property.Number("Heat Rate", configurable=True, default_value=20, description="Units per minute")
     b_heat_actor_prop = Property.Actor("Heater", description="The heating actor this sensor responds to")
-    c_cool_rate_prop = Property.Number("Cool Rate", configurable=True, default_value=10, description="Units per minute")
-    d_cool_actor_prop = Property.Actor("Heater", description="The cooling actor this sensor responds to")
-    e_drift_rate_prop = Property.Number("Drift Rate", configurable=True, default_value=2, description="Units per minute")
+    c_cool_rate_prop = Property.Number("Cool Rate", configurable=True, default_value=20, description="Units per minute")
+    d_cool_actor_prop = Property.Actor("Cooler", description="The cooling actor this sensor responds to")
+    e_drift_rate_prop = Property.Number("Drift Rate", configurable=True, default_value=5, description="Units per minute")
     f_ambient_temp_prop = Property.Number("Ambient Temp", configurable=True, default_value=65, description="Temperature drifted toward")
-    g_update_freq_prop = Property.Number("Frequency", configurable=True, default_value=5, description="Time in seconds between readings")
+    g_min_temp_prop = Property.Number("Min Temp", configurable=True, description="Minimum possible temperature, leave blank for freezing")
+    h_max_temp_prop = Property.Number("Max Temp", configurable=True, description="Maximum possible temperature, leave blank for boiling")
+    i_update_freq_prop = Property.Number("Update Frequency", configurable=True, default_value=5, description="Seconds between value updates")
 
     #-------------------------------------------------------------------------------
     def init(self):
-        super(SimulatedSensor, self).init()
+        try: self.freq = float(self.i_update_freq_prop)
+        except: self.freq = 5.0
 
         try:
-            self.freq = float(self.g_update_freq_prop)
-        except:
-            self.freq = 5.0
-        try:
             self.heat_rate = float(self.a_heat_rate_prop)/60.0 * self.freq
-            self.heat_act = int(self.b_heat_actor_prop)
+            self.heat_actorID = int(self.b_heat_actor_prop)
         except:
             self.heat_rate = 0.0
-            self.heat_act = None
+            self.heat_actorID = None
         try:
             self.cool_rate = float(self.c_cool_rate_prop)/60.0 * self.freq
-            self.cool_act = int(self.d_cool_actor_prop)
+            self.cool_actorID = int(self.d_cool_actor_prop)
         except:
             self.cool_rate = 0.0
-            self.cool_act = None
+            self.cool_actorID = None
         try:
             self.drift_rate = float(self.e_drift_rate_prop)/60.0 * self.freq
             self.ambient_temp = float(self.f_ambient_temp_prop)
@@ -46,25 +45,29 @@ class SimulatedSensor(SensorActive):
             self.drift_rate = 0.0
             self.ambient_temp = 0.0
 
+        try: self.min_temp = float(self.g_min_temp_prop)
+        except: self.min_temp = 0.0 if self.get_config_parameter('unit', 'C') == 'C' else 32.0
+        try: self.max_temp = float(self.h_max_temp_prop)
+        except: self.max_temp = 100.0 if self.get_config_parameter('unit', 'C') == 'C' else 212.0
+
         self.last_temp = self.ambient_temp
 
-    #-------------------------------------------------------------------------------
-    def stop(self):
-        super(SimulatedSensor, self).stop()
+        SensorActive.init(self)
 
     #-------------------------------------------------------------------------------
     def execute(self):
-        while self.is_running():
-            heat_on = cool_on = False
-            if self.heat_act is not None:
-                heat_on = cbpi.cache.get("actors")[self.heat_act].state
-            if self.cool_act is not None:
-                cool_on = cbpi.cache.get("actors")[self.cool_act].state
+        # at startup, wait for actors to initialze
+        while cbpi.cache.get("actors") is None:
+            self.sleep(5)
 
-            if heat_on:
-                temp = self.last_temp + self.heat_rate
-            elif cool_on:
-                temp = self.last_temp - self.cool_rate
+        while self.is_running():
+            heater = self.api.cache.get("actors").get(self.heat_actorID, None)
+            cooler = self.api.cache.get("actors").get(self.cool_actorID, None)
+
+            if heater and int(heater.state):
+                temp = self.last_temp + self.heat_rate * (float(heater.power)/100.0)
+            elif cooler and int(cooler.state):
+                temp = self.last_temp - self.cool_rate * (float(cooler.power)/100.0)
             else:
                 diff = self.ambient_temp - self.last_temp
                 if abs(diff) <= self.drift_rate:
@@ -72,13 +75,13 @@ class SimulatedSensor(SensorActive):
                 else:
                     temp = self.last_temp + math.copysign(self.drift_rate, diff)
 
-            self.data_received(round(temp, 2))
-            self.last_temp = temp
-            self.sleep(self.freq)
+            temp = max(temp, self.min_temp)
+            temp = min(temp, self.max_temp)
 
-    #-------------------------------------------------------------------------------
-    def get_unit(self):
-        return "°C" if self.get_config_parameter("unit", "C") == "C" else "°F"
+            self.data_received("{:.2f}".format(temp))
+            self.last_temp = temp
+
+            self.sleep(self.freq)
 
 ################################################################################
 @cbpi.sensor
@@ -91,7 +94,6 @@ class SineWaveSensor(SensorActive):
 
     #-------------------------------------------------------------------------------
     def init(self):
-        super(SineDummySensor, self).init()
 
         self.min = float(self.min_prop)
         self.max = float(self.max_prop)
@@ -102,9 +104,7 @@ class SineWaveSensor(SensorActive):
         self.mid = self.min + self.amplitude
         self.start_time = time.time()
 
-    #-------------------------------------------------------------------------------
-    def stop(self):
-        super(SineDummySensor, self).stop()
+        SensorActive.init(self)
 
     #-------------------------------------------------------------------------------
     def execute(self):
@@ -112,9 +112,5 @@ class SineWaveSensor(SensorActive):
             whole, part = divmod(time.time()-self.start_time, self.period)
             radians = part/self.period * math.pi * 2.0
             temp = self.amplitude * math.sin(radians) + self.mid
-            self.data_received(round(temp, 2))
+            self.data_received("{:.2f}".format(temp))
             self.sleep(self.freq)
-
-    #-------------------------------------------------------------------------------
-    def get_unit(self):
-        return "°C" if self.get_config_parameter("unit", "C") == "C" else "°F"
